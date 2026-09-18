@@ -1,0 +1,57 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      AMPM_UPDATE_REPOSITORY: ${{ github.repository }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust tools
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - name: Verify
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node --check web/app.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -File tests/install.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/package.ps1 -Repository $env:GITHUB_REPOSITORY -Tag $env:GITHUB_REF_NAME -Binary target/x86_64-pc-windows-msvc/release/ampm.exe
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Upload all assets to a draft first: clients must never see a half-published update.
+          gh release create $env:GITHUB_REF_NAME --verify-tag --draft --title "AMPM $env:GITHUB_REF_NAME" --generate-notes target/dist/ampm-windows-x64.exe target/dist/ampm-windows-x64.exe.sha256 target/dist/install.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          gh release edit $env:GITHUB_REF_NAME --draft=false --latest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

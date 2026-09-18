@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="AMPM — 本地优先的 Amp Runner 与文件夹管理器。">
+  <title>AMPM · Runner 管理器</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23dc623e'/%3E%3Cpath d='M23 6 10 23h9l-2 11 14-19h-10z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a href="#main" class="skip-link">跳转到主要内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="#runners" aria-label="AMPM 首页"><span class="brand-symbol">ϟ</span><span>AMPM</span></a>
+    <nav aria-label="主导航">
+      <a href="#runners" data-nav="runners" title="Runner"><span data-icon="server"></span><span class="nav-text">Runner</span><span class="nav-count" id="nav-count">0</span></a>
+      <a href="#folders" data-nav="folders" title="目录"><span data-icon="folder"></span><span class="nav-text">目录</span><span class="nav-count" id="folder-count">0</span></a>
+      <a href="#activity" data-nav="activity" title="日志"><span data-icon="activity"></span><span class="nav-text">日志</span></a>
+      <a href="#settings" data-nav="settings" title="设置"><span data-icon="settings"></span><span class="nav-text">设置</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <a class="docs-link" href="https://ampcode.com" target="_blank" rel="noreferrer" title="打开 Amp 网页"><span data-icon="arrow-up-right"></span><span class="nav-text">Amp 网页</span></a>
+      <div id="connection" class="connection" role="status"><i></i><span>正在连接</span></div>
+    </div>
+  </aside>
+  <div class="shell">
+    <main id="main" tabindex="-1"><div class="initial-loading">正在连接本地管理器…</div></main>
+  </div>
+  <dialog id="editor" aria-labelledby="editor-title"></dialog>
+  <dialog id="browser" aria-labelledby="browser-title"></dialog>
+  <dialog id="details" aria-labelledby="details-title"></dialog>
+  <dialog id="confirm" class="small-dialog" aria-labelledby="confirm-title"></dialog>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>
