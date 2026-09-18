@@ -21,7 +21,7 @@ try { $fixture.checksum = [BitConverter]::ToString($sha.ComputeHash($fixture.byt
 finally { $sha.Dispose() }
 
 function Assert($Condition, [string]$Message) { if (-not $Condition) { throw "Assertion failed: $Message" } }
-function Get-FileHash($LiteralPath) {
+function Get-FixtureHash($LiteralPath) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { [pscustomobject]@{Hash=[BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($LiteralPath))).Replace('-', '')} }
     finally { $sha.Dispose() }
@@ -95,18 +95,18 @@ function Run-Install { & $installer -Repository 'fixture/ampm' -ReleaseTag 'v0.1
 try {
     Run-Install
     $target = Join-Path $fixture.installDir 'ampm.exe'
-    $original = (Get-FileHash -LiteralPath $target).Hash
-    Assert ($original -eq $fixture.checksum.Split(' ')[0]) 'First install binary'
+    $original = (Get-FixtureHash -LiteralPath $target).Hash
+    Assert ($original -eq $fixture.checksum.Split(' ')[0]) "First install binary: actual=$original expected=$($fixture.checksum)"
     Assert ($fixture.properties.InstallLocation -eq $fixture.installDir) 'Uninstall registration'
     Assert ($fixture.properties.UninstallString.Contains('-InstallDir "' + $fixture.installDir + '"')) 'Quoted uninstall path'
     Assert ($fixture.links.Count -eq 1 -and $fixture.links[0].TargetPath -eq $target -and $fixture.links[0].Arguments -eq '--open') 'Start Menu shortcut'
     [IO.File]::WriteAllText((Join-Path $fixture.installDir 'user-data.txt'), 'keep me')
     Run-Install
-    Assert ((Get-FileHash -LiteralPath $target).Hash -eq $original) 'Reinstallation'
+    Assert ((Get-FixtureHash -LiteralPath $target).Hash -eq $original) 'Reinstallation'
 
     $fixture.corrupt = $true
     Expect-Failure { Run-Install } 'SHA-256 mismatch'
-    Assert ((Get-FileHash -LiteralPath $target).Hash -eq $original) 'Corrupt download preserves installed file'
+    Assert ((Get-FixtureHash -LiteralPath $target).Hash -eq $original) 'Corrupt download preserves installed file'
     $fixture.corrupt = $false
     $fixture.running = $true
     $count = $fixture.urls.Count
@@ -116,7 +116,7 @@ try {
     $lock = [IO.File]::Open($target, 'Open', 'Read', 'None')
     try { Expect-Failure { Run-Install } 'used by another process|being used|另一个进程|正由' }
     finally { $lock.Dispose() }
-    Assert ((Get-FileHash -LiteralPath $target).Hash -eq $original) 'File lock preserves installed file'
+    Assert ((Get-FixtureHash -LiteralPath $target).Hash -eq $original) 'File lock preserves installed file'
 
     $fixture.runtime = $false; $fixture.signed = $false
     Expect-Failure { Run-Install } 'Invalid Microsoft'

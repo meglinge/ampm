@@ -24,7 +24,7 @@
 
 发布时先提升 `Cargo.toml` 的版本并更新 `Cargo.lock`，提交后创建匹配的标签（如 `v0.1.1`）并推送。不要覆盖已发布标签或替换其文件；修复应发布新的递增版本。手动运行工作流也必须选择匹配的版本标签。
 
-本地可用 `scripts\package.ps1 -Repository meglinge/ampm -Tag v0.1.0` 生成 `target\dist` 中的三个发布文件，不会上传；打包前须以相同更新源编译 Release。
+本地可用 `scripts\package.ps1 -Repository meglinge/ampm -Tag v0.1.1` 生成 `target\dist` 中的三个发布文件，不会上传；打包前须以相同更新源编译 Release。
 
 ## 运行
 

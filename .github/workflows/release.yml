@@ -31,15 +31,15 @@ jobs:
           rustup default stable
       - name: Verify
         run: |
+          powershell.exe -NoProfile -File tests/install.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node --check web/app.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo fmt --check
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo clippy --locked --all-targets -- -D warnings
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node --check web/app.js
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          powershell.exe -NoProfile -File tests/install.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build
         run: |
