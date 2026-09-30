@@ -108,6 +108,10 @@ pub fn startup_args(runner: &Runner) -> Vec<String> {
     if runner.discover {
         args.push("--discover-dirs".into());
     }
+    // Sharing is opt-in per launch; omitting the flag keeps the runner private.
+    if runner.share {
+        args.push("--share".into());
+    }
     // Amp always serves its process cwd. Keep this CLI detail out of the folder model.
     for path in runner.directories.iter().skip(1) {
         args.extend(["--dir".into(), path.clone()]);
@@ -207,7 +211,11 @@ pub fn command(runner: &Runner, args: &[String], supervised: bool) -> Command {
     cmd
 }
 
-pub async fn output(mut cmd: Command) -> Result<String, ApiError> {
+pub async fn output(cmd: Command) -> Result<String, ApiError> {
+    output_with_timeout(cmd, Duration::from_secs(15)).await
+}
+
+pub async fn output_with_timeout(mut cmd: Command, limit: Duration) -> Result<String, ApiError> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -215,9 +223,14 @@ pub async fn output(mut cmd: Command) -> Result<String, ApiError> {
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     let child = cmd.spawn().map_err(|e| spawn_error(&cmd, e))?;
-    let result = timeout(Duration::from_secs(15), child.wait_with_output())
+    let result = timeout(limit, child.wait_with_output())
         .await
-        .map_err(|_| fail("Amp 命令超时（15 秒），请检查 CLI 登录与运行状态"))?
+        .map_err(|_| {
+            fail(format!(
+                "Amp 命令超时（{} 秒），请检查网络与 CLI 状态后重新检测",
+                limit.as_secs()
+            ))
+        })?
         .map_err(|e| fail(e.to_string()))?;
     let text = format!(
         "{}{}",

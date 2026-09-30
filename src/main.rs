@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod cli;
 #[cfg(windows)]
 mod desktop;
 mod process;
@@ -27,7 +28,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Runner {
     pub id: String,
@@ -44,6 +45,8 @@ pub struct Runner {
     pub discover: bool,
     #[serde(default)]
     pub terminal: bool,
+    #[serde(default)]
+    pub share: bool,
 }
 fn default_executable() -> String {
     "amp".into()
@@ -159,6 +162,7 @@ struct Manager {
     file: PathBuf,
     processes: HashMap<String, process::Running>,
     updating: bool,
+    cli_updating: bool,
 }
 impl Manager {
     fn load(directory: &FsPath) -> Result<Self, Box<dyn std::error::Error>> {
@@ -214,11 +218,14 @@ impl Manager {
             file,
             processes: HashMap::new(),
             updating: false,
+            cli_updating: false,
         })
     }
     fn ensure_writable(&self) -> Result<(), ApiError> {
         if self.updating {
             Err(conflict("AMPM 正在更新，请等待重启"))
+        } else if self.cli_updating {
+            Err(conflict("Amp 正在更新，请稍后再操作"))
         } else {
             Ok(())
         }
@@ -283,6 +290,7 @@ impl Manager {
 struct App {
     manager: Arc<Mutex<Manager>>,
     updater: Arc<updates::Updater>,
+    cli: Arc<cli::Cli>,
     token: String,
     port: u16,
 }
@@ -362,7 +370,9 @@ fn router(app: App) -> Router {
         .route("/api/runners/{id}/logs", get(logs))
         .route("/api/batch", post(batch))
         .route("/api/browse", get(browse))
-        .route("/api/cli", get(cli_info))
+        .route("/api/cli", get(cli::info))
+        .route("/api/cli/check", post(cli::check))
+        .route("/api/cli/update", post(cli::update))
         .route("/api/external", get(external))
         .route("/api/update/check", post(updates::check))
         .route("/api/update/install", post(updates::install))
@@ -376,6 +386,7 @@ async fn state(State(app): State<App>) -> Json<Value> {
     let mut view = app.manager.lock().await.view();
     view["token"] = json!(app.token);
     view["update"] = json!(app.updater.state().await);
+    view["cli"] = json!(app.cli.states.lock().await.clone());
     Json(view)
 }
 async fn create_runner(
@@ -605,17 +616,6 @@ async fn browse(Query(query): Query<Browse>) -> Result<Json<Value>, ApiError> {
         Ok(Json(json!({"path": root.to_string_lossy(), "parent": root.parent().map(|p| p.to_string_lossy()), "entries": entries})))
     }).await.map_err(|e| fail(e.to_string()))?
 }
-async fn cli_info() -> Json<Value> {
-    let mut cmd = process::native_command("amp");
-    cmd.arg("--version").kill_on_drop(true);
-    let executable = cmd.as_std().get_program().to_string_lossy().into_owned();
-    match process::output(cmd).await {
-        Ok(version) => {
-            Json(json!({"available": true, "version": version.trim(), "executable": executable}))
-        }
-        Err(e) => Json(json!({"available": false, "error": e.1, "executable": executable})),
-    }
-}
 async fn external() -> Result<Json<Value>, ApiError> {
     let mut cmd = process::native_command("amp");
     cmd.args(["runner", "list"]).kill_on_drop(true);
@@ -669,6 +669,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app = App {
         manager,
         updater: updater.clone(),
+        cli: Arc::new(cli::Cli::new()?),
         token: uuid::Uuid::new_v4().to_string(),
         port,
     };
@@ -710,6 +711,7 @@ async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
     let manager = app.manager.clone();
+    let updater = app.updater.clone();
     let monitor_manager = manager.clone();
     // Process supervision must continue even when there is no visible GUI polling /api/state.
     let monitor = tokio::spawn(async move {
@@ -726,6 +728,7 @@ async fn serve(
                 _ = shutdown => {},
                 _ = tokio::signal::ctrl_c() => {},
             }
+            updater.finish().await;
         })
         .await;
     monitor.abort();

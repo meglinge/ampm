@@ -15,17 +15,24 @@ pub(crate) fn sample(directory: &FsPath) -> Runner {
         directories: vec![directory.to_string_lossy().into()],
         discover: false,
         terminal: false,
+        share: false,
     }
 }
 pub(crate) fn test_app(directory: &FsPath) -> App {
     App {
         manager: Arc::new(Mutex::new(Manager::load(directory).unwrap())),
         updater: Arc::new(updates::Updater::new(directory, false).unwrap()),
+        cli: Arc::new(cli::Cli::new().unwrap()),
         token: "test-token".into(),
         port: 19380,
     }
 }
-async fn request(app: &App, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
+pub(crate) async fn request(
+    app: &App,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let response = router(app.clone())
         .oneshot(
             HttpRequest::builder()
@@ -130,8 +137,10 @@ fn startup_arguments_preserve_paths_and_explicitly_disable_terminal() {
     );
     runner.discover = true;
     runner.terminal = true;
+    runner.share = true;
     let args = process::startup_args(&runner);
     assert!(args.contains(&"--discover-dirs".into()));
+    assert!(args.contains(&"--share".into()));
     assert!(args.contains(&"--remote-control-terminal".into()));
     assert!(!args.contains(&"--no-remote-control-terminal".into()));
     runner.backend = "wsl".into();
@@ -249,7 +258,9 @@ async fn windows_amp_commands_work_with_stale_desktop_path() {
             .is_err(),
         "The old PATH-only lookup must fail in this reproduction"
     );
-    let Json(cli) = cli_info().await;
+    let app = test_app(&home);
+    let (status, cli) = request(&app, "GET", "/api/cli", json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(cli["available"], true);
     assert_eq!(cli["version"], "amp-fixture 1.0 (offline test double)");
     assert_eq!(

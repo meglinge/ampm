@@ -74,11 +74,14 @@ $env:AMPM_DATA_DIR = 'D:\MyData\ampm'
 - 单个或批量启动、停止、重启，独立报告每项成功或失败。
 - 文件夹集中视图、本机磁盘目录浏览器、批量添加目录、解除关联。
 - 每个 Runner 只有一份平等的目录列表，不区分主目录或附加目录；每项使用相同的管理操作。
-- 稳定 Runner ID、重复 `--dir`、`--discover-dirs` 与远程终端开关。
+- 稳定 Runner ID、重复 `--dir`、`--discover-dirs`、远程终端与工作区共享（`--share`）开关。
 - 每个 Runner 独立设置 Amp 可执行路径，以及原生或 WSL 启动方式。
 - 标准输出、错误输出与管理器日志，保留最近 300 条，单行上限约 8 KiB。
-- CLI 安装检测，以及 `amp runner list` 原始输出的只读发现。
+- Amp CLI 当前版本、稳定版检查与手动更新，支持本机默认和各 Runner 的原生 / WSL 环境。
+- `amp runner list` 原始输出的只读发现。
 - `N` 新建，`/` 搜索；窄屏布局与键盘可操作的对话框。
+
+在“设置 → Amp CLI”选择安装环境，点击“检查更新”，有新版时点击“更新 Amp”。检查只读取版本与官方稳定版信息；安装调用所选 CLI 的 `amp update --porcelain`，随后重新读取版本确认结果，不修改 Runner 配置或自动重启。更新前须停止所有托管 Runner，并自行结束其他 Amp 会话；更新期间禁止启动 Runner、修改配置及同时更新 AMPM。旧版 CLI 不支持更新或权限不足时会显示命令错误，不回退到其他安装路径。此功能不会替未安装的环境安装 Amp，也不改变 Amp 自身的自动更新设置。
 
 ## Amp 的边界
 
@@ -113,6 +116,7 @@ Amp 的自动更新可能替换自身进程。AMPM 不自动重启退出的 Runn
 - 前端无第三方脚本，启用 CSP；用户名称、目录和日志按文本转义。
 - 原生进程通过参数数组启动；Windows 使用 Job Object 关闭托管进程树，Unix 使用独立进程组。
 - 远程终端默认显式关闭，不受继承的 `AMP_REMOTE_CONTROL_TERMINAL=1` 影响；启用和启动前有风险提示。
+- 工作区共享默认关闭；开启后启动时附加 `--share`，工作区成员可在 ampcode.com 的 Shared Runners 中使用该 Runner。成员会以你的身份在本机运行代码，使用你的文件、凭据和登录状态，并可能同时操作相同目录，仅共享给你信任其拥有本机 Shell 的人。工作区管理员可在 Member Settings 中禁用共享。
 - 这是给可信本机用户使用的管理工具，不是多用户认证系统。Runner 继承当前用户的文件、凭据、网络与工具权限；停止/重启可能中断任务。
 
 ## 开发与验证
@@ -131,6 +135,8 @@ Rust 测试覆盖 ID/路径校验、参数边界、配置持久化及损坏保�
 
 更新测试覆盖稳定版本比较、文件校验、限长下载及截断响应、更新互斥与安装条件，以及临时 Windows 进程的真实 EXE 替换。安装脚本测试在临时目录执行首次安装、重装、损坏下载、文件占用、卸载；网络、注册表、快捷方式和 WebView2 安装使用替身，不修改真实安装。
 
+Amp CLI 更新测试覆盖构建时间戳比较、只读检查、所选路径与 WSL 参数、更新后版本核对、命令失败、版本未变、避免降级及更新期间的状态查询和操作互斥。
+
 `tests\fixtures\fake_amp.rs` 是不联网的 CLI 测试替身，测试会用 `rustc` 编译到临时目录，不会启动真实 Amp Runner 或使用账号额度。GUI 验证同样应使用独立的 `AMPM_DATA_DIR` 和这个替身，避免对用户现有 Runner 产生影响。测试时可在启动前设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9224`，通过 CDP 检查真实 WebView2；产品默认不启用调试端口。
 
-参考：[One runner is now enough](https://ampcode.com/news/one-runner-is-now-enough) · [Runner 文档](https://ampcode.com/docs/cli/runners)
+参考：[One runner is now enough](https://ampcode.com/news/one-runner-is-now-enough) · [Shared runners](https://ampcode.com/news/shared-runners) · [Runner 文档](https://ampcode.com/docs/cli/runners)

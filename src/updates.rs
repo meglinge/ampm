@@ -39,7 +39,8 @@ pub struct Preferences {
 
 pub struct Updater {
     state: Mutex<UpdateState>,
-    operation: Mutex<()>,
+    // Amp CLI and AMPM updates share a lock, including orderly shutdown.
+    pub(crate) operation: Mutex<()>,
     preferences: PathBuf,
     client: reqwest::Client,
     pub visible: AtomicBool,
