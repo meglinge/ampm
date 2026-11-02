@@ -34,7 +34,7 @@ nav a.active::before { content: ''; position: absolute; left: 0; top: 11px; bott
 .connection { display: flex; gap: 8px; align-items: center; padding: 12px 10px 0; color: var(--muted); font-size: 12px; }
 .connection i, .dot, .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #9aa1aa; display: inline-block; flex-shrink: 0; }
 .connection i, .status-dot.running { background: var(--green); }
-.connection.offline i, .status-dot.exited { background: #c57836; }
+.connection.offline i, .status-dot.exited, .status-dot.restarting { background: #c57836; }
 .connection.offline { color: #a35b26; }
 .shell { height: 100%; margin-left: 166px; }
 main { height: 100%; display: flex; flex-direction: column; min-width: 0; }
@@ -84,7 +84,7 @@ input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(-
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 4px; background: #f0f2f4; color: #707782; font-size: 12px; white-space: nowrap; }
 .pill .dot { background: currentColor; }
 .pill.running { color: var(--green); background: #eaf5ef; }
-.pill.exited { color: #a76a28; background: #fff4e7; }
+.pill.exited, .pill.restarting { color: #a76a28; background: #fff4e7; }
 .detail-actions { margin: 18px 0 24px; flex-wrap: wrap; }
 .detail-section { margin-top: 24px; }
 .properties { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px 16px; margin: 16px 0 0; }

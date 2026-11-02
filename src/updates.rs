@@ -118,7 +118,7 @@ impl Updater {
         {
             return Err("自动更新等待窗口收起".into());
         }
-        if manager.processes.values_mut().any(|p| p.refresh()) {
+        if manager.processes.values_mut().any(|p| p.busy()) {
             return Err("请先停止所有 Runner".into());
         }
         manager.ensure_writable().map_err(|e| e.1)
@@ -266,7 +266,7 @@ impl Updater {
                         .await
                         .processes
                         .values_mut()
-                        .any(|p| p.refresh())
+                        .any(|p| p.busy())
                 {
                     last_attempt = Some(std::time::Instant::now());
                     let _ = app.updater.install(&app, true).await;

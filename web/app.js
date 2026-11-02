@@ -35,7 +35,8 @@ const icon = (name) => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke
 $$('[data-icon]').forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
 const app = { runners: [], token: '', platform: '', config_path: '', cli: {}, cliTarget: '', cliPending: false, selected: new Set(), focused: '', inspect: null, filter: 'all', search: '', page: 'runners', logRunner: '', busy: false, loaded: false, signature: '' };
 const names = { runners: 'Runner', folders: '目录', activity: '日志', settings: '设置' };
-const statusText = { running: '运行中', stopped: '已停止', exited: '已退出' };
+const statusText = { running: '运行中', restarting: '待重启', stopped: '已停止', exited: '已退出' };
+const runnerBusy = (r) => ['running', 'restarting'].includes(r.status);
 const runnerById = (id) => app.runners.find((r) => r.config.id === id);
 const runnerUrl = (id) => `/api/runners/${encodeURIComponent(id)}`;
 const folderRows = () => app.runners.flatMap((r) => r.config.directories.map((path) => ({ runner: r, path })));
@@ -77,8 +78,8 @@ function confirmAction(title, text, accept = '确认') {
 async function refresh(force = false) {
   try {
     const state = await api('/api/state');
-    const signature = JSON.stringify([state.runners, state.update, state.cli]);
-    Object.assign(app, { runners: state.runners, token: state.token, platform: state.platform, config_path: state.config_path, update: state.update, cli: state.cli, loaded: true });
+    const signature = JSON.stringify([state.runners, state.update, state.cli, state.startup]);
+    Object.assign(app, { runners: state.runners, token: state.token, platform: state.platform, config_path: state.config_path, update: state.update, cli: state.cli, startup: state.startup, loaded: true });
     app.selected = new Set([...app.selected].filter((id) => runnerById(id)));
     $('#connection').className = 'connection';
     $('#connection').innerHTML = '<i></i><span>后台已连接</span>';
@@ -113,9 +114,9 @@ function runnerRow(r) {
 }
 function runnerDetail(r) {
   if (!r) return '<div class="empty-state"><p>选择一个 Runner 查看详情</p></div>';
-  const c = r.config, id = escapeHtml(c.id), running = r.status === 'running';
+  const c = r.config, id = escapeHtml(c.id), running = r.status === 'running', busy = runnerBusy(r);
   const attrs = `data-id="${id}" ${app.busy ? 'disabled' : ''}`;
-  return `<div class="detail-heading"><div><h2>${escapeHtml(c.name)}</h2><code>${id}</code></div>${pill(r)}</div><div class="detail-actions">${button(running ? 'stop' : 'start', running ? '停止' : '启动', running ? 'stop' : 'play', running ? '' : 'primary', attrs)}${running ? button('restart', '重启', 'refresh', '', attrs) : ''}${button('edit', '编辑', 'edit', '', `data-id="${id}" ${running || app.busy ? 'disabled title="停止后可编辑启动配置"' : ''}`)}${button('logs', '日志', 'terminal', '', `data-id="${id}"`)}</div>${r.exit ? `<div class="notice">${escapeHtml(r.exit)}</div>` : ''}<section class="detail-section"><h3>运行信息</h3><dl class="properties"><dt>环境</dt><dd>${c.backend === 'wsl' ? `WSL · ${escapeHtml(c.distribution || '默认发行版')}` : escapeHtml(app.platform === 'windows' ? 'Windows · 本机' : app.platform)}</dd><dt>进程</dt><dd>${r.pid ? `PID ${r.pid}` : '—'}${r.started ? `<span class="muted" data-started="${r.started}">${uptime(r.started)}</span>` : ''}</dd><dt>可执行文件</dt><dd><code>${escapeHtml(c.executable)}</code></dd><dt>自动发现</dt><dd>${c.discover ? '已开启' : '已关闭'}</dd><dt>远程终端</dt><dd>${c.terminal ? '<span class="permission-on">已开启</span>' : '已关闭'}</dd><dt>工作区共享</dt><dd>${c.share ? '<span class="permission-on">已共享</span>' : '仅自己'}</dd></dl></section><section class="detail-section"><div class="section-head"><h3>目录 <span class="muted">${c.directories.length}</span></h3>${button('add-folder', '添加', 'plus', 'subtle', `data-id="${id}"`)}</div><div class="directory-list">${c.directories.map((path) => `<div class="detail-dir">${icon('folder')}<div><code>${escapeHtml(path)}</code></div>${iconButton('remove-folder', '解除目录关联', 'trash', `data-id="${id}" data-path="${escapeHtml(path)}"`)}</div>`).join('')}</div><div class="directory-footer">${button('inspect', '读取实际目录', 'scan', 'subtle', `data-id="${id}" ${!running || app.inspect?.loading ? 'disabled' : ''} title="读取 Amp CLI 返回的目录，需 Runner 运行中"`)}<details class="inline-help"><summary>目录规则</summary><p>启动目录需停止后移除。自动发现及 Amp 记忆的目录以 CLI 输出为准；目录列表不是权限沙箱。</p></details></div><pre class="terminal-output" id="inspect-output" ${app.inspect?.id === c.id ? '' : 'hidden'}>${app.inspect?.id === c.id ? escapeHtml(app.inspect.text) : ''}</pre></section>`;
+  return `<div class="detail-heading"><div><h2>${escapeHtml(c.name)}</h2><code>${id}</code></div>${pill(r)}</div><div class="detail-actions">${button(busy ? 'stop' : 'start', busy ? '停止' : '启动', busy ? 'stop' : 'play', busy ? '' : 'primary', attrs)}${running ? button('restart', '重启', 'refresh', '', attrs) : ''}${button('edit', '编辑', 'edit', '', `data-id="${id}" ${busy || app.busy ? 'disabled title="停止后可编辑启动配置"' : ''}`)}${button('logs', '日志', 'terminal', '', `data-id="${id}"`)}</div>${r.exit ? `<div class="notice">${escapeHtml(r.exit)}${r.status === 'restarting' ? '<br>等待自动重启，点击“停止”可取消。' : ''}</div>` : ''}<section class="detail-section"><h3>运行信息</h3><dl class="properties"><dt>环境</dt><dd>${c.backend === 'wsl' ? `WSL · ${escapeHtml(c.distribution || '默认发行版')}` : escapeHtml(app.platform === 'windows' ? 'Windows · 本机' : app.platform)}</dd><dt>进程</dt><dd>${r.pid ? `PID ${r.pid}` : '—'}${r.started ? `<span class="muted" data-started="${r.started}">${uptime(r.started)}</span>` : ''}</dd><dt>可执行文件</dt><dd><code>${escapeHtml(c.executable)}</code></dd><dt>随 AMPM 启动</dt><dd>${c.autostart ? '已开启' : '已关闭'}</dd><dt>异常自动重启</dt><dd>${c.restart_limit ? `已用 ${r.restart_attempts} / ${c.restart_limit} 次 · 间隔 5 秒` : '已关闭'}</dd><dt>自动发现</dt><dd>${c.discover ? '已开启' : '已关闭'}</dd><dt>远程终端</dt><dd>${c.terminal ? '<span class="permission-on">已开启</span>' : '已关闭'}</dd><dt>工作区共享</dt><dd>${c.share ? '<span class="permission-on">已共享</span>' : '仅自己'}</dd></dl></section><section class="detail-section"><div class="section-head"><h3>目录 <span class="muted">${c.directories.length}</span></h3>${button('add-folder', '添加', 'plus', 'subtle', `data-id="${id}"`)}</div><div class="directory-list">${c.directories.map((path) => `<div class="detail-dir">${icon('folder')}<div><code>${escapeHtml(path)}</code></div>${iconButton('remove-folder', '解除目录关联', 'trash', `data-id="${id}" data-path="${escapeHtml(path)}"`)}</div>`).join('')}</div><div class="directory-footer">${button('inspect', '读取实际目录', 'scan', 'subtle', `data-id="${id}" ${!running || app.inspect?.loading ? 'disabled' : ''} title="读取 Amp CLI 返回的目录，需 Runner 运行中"`)}<details class="inline-help"><summary>目录规则</summary><p>启动目录需停止后移除。自动发现及 Amp 记忆的目录以 CLI 输出为准；目录列表不是权限沙箱。</p></details></div><pre class="terminal-output" id="inspect-output" ${app.inspect?.id === c.id ? '' : 'hidden'}>${app.inspect?.id === c.id ? escapeHtml(app.inspect.text) : ''}</pre></section>`;
 }
 function renderRunnerList() {
   const container = $('#runner-list');
@@ -147,7 +148,8 @@ function activityPage() {
   return `${heading('日志', app.runners.length ? button('refresh-logs', '刷新', 'refresh') : '')}${app.runners.length ? `<div class="log-toolbar"><label for="log-runner">Runner</label><select id="log-runner">${app.runners.map((r) => `<option value="${escapeHtml(r.config.id)}" ${app.logRunner === r.config.id ? 'selected' : ''}>${escapeHtml(r.config.name)}</option>`).join('')}</select><small>最近 300 条 · 自动更新</small></div><div id="log-output" class="logs-panel" data-scroll="logs" aria-label="进程日志">正在读取…</div>` : emptyState()}`;
 }
 function settingsPage() {
-  return `${heading('设置')}<div class="page-content settings-content" data-scroll="settings">${cliSettings()}${updateSettings()}<section class="settings-section"><h2>本地服务</h2><dl class="properties"><dt>配置文件</dt><dd><code>${escapeHtml(app.config_path)}</code></dd><dt>内部地址</dt><dd><code>${escapeHtml(location.origin)}</code></dd><dt>关闭窗口</dt><dd>隐藏到托盘，Runner 继续运行</dd><dt>退出程序</dt><dd>托盘菜单退出，停止托管进程</dd></dl></section><details class="settings-section advanced"><summary>权限与兼容性</summary><p>Runner 继承当前用户权限，不是沙箱。内部服务仅监听回环地址，写操作使用会话令牌。</p><p>WSL 需独立安装并登录 Amp。强制结束管理器后，应检查 WSL 遗留进程。</p><p>Amp 自动更新可能替换进程；AMPM 不接管新进程或自动重启。需要稳定托管时，可在 Amp 设置中关闭：</p><pre>"amp.runner.autoUpdate.enabled": false</pre></details></div>`;
+  const s = app.startup;
+  return `${heading('设置')}<div class="page-content settings-content" data-scroll="settings"><section class="settings-section"><h2>启动与恢复</h2><label class="toggle-row"><span class="toggle-info"><strong>登录 Windows 后启动 AMPM</strong><small>仅当前用户，静默进入托盘；保留当前数据目录和端口。</small></span><span class="switch"><input type="checkbox" id="login-startup" aria-label="登录 Windows 后启动 AMPM" ${s?.enabled ? 'checked' : ''} ${!s?.supported || app.busy ? 'disabled' : ''}><span></span></span></label>${s?.error ? `<p role="alert">${escapeHtml(s.error)}</p>` : ''}${!s?.supported ? '<p>登录自启仅支持 Windows 桌面模式。</p>' : ''}<p>在各 Runner 的“编辑”中选择随 AMPM 启动及异常重启次数。手动停止会取消待重启；AMPM 自身崩溃不自动恢复。</p></section>${cliSettings()}${updateSettings()}<section class="settings-section"><h2>本地服务</h2><dl class="properties"><dt>配置文件</dt><dd><code>${escapeHtml(app.config_path)}</code></dd><dt>内部地址</dt><dd><code>${escapeHtml(location.origin)}</code></dd><dt>关闭窗口</dt><dd>隐藏到托盘，Runner 继续运行</dd><dt>退出程序</dt><dd>托盘菜单退出，停止托管进程</dd></dl></section><details class="settings-section advanced"><summary>权限与兼容性</summary><p>Runner 继承当前用户权限，不是沙箱。内部服务仅监听回环地址，写操作使用会话令牌。</p><p>WSL 需独立安装并登录 Amp。强制结束管理器后，应检查 WSL 遗留进程。</p><p>Amp 自动更新可能替换进程；AMPM 不接管新进程。正常退出不会触发异常重启。需要稳定托管时，可在 Amp 设置中关闭：</p><pre>"amp.runner.autoUpdate.enabled": false</pre></details></div>`;
 }
 function cliBusy() {
   return app.cliPending || Object.values(app.cli).some((c) => ['checking', 'updating'].includes(c.status));
@@ -156,7 +158,7 @@ function cliSettings() {
   if (app.cliTarget && !runnerById(app.cliTarget)) app.cliTarget = '';
   const c = app.cli[app.cliTarget];
   const busy = cliBusy() || ['checking', 'downloading', 'restarting'].includes(app.update?.status);
-  const running = app.runners.some((r) => r.status === 'running');
+  const running = app.runners.some(runnerBusy);
   const message = c?.error || ({ idle: '尚未检查更新', checking: '正在检查…', available: '有新版本可用', current: '已是最新稳定版', newer: '当前版本高于最新稳定版', updating: '正在更新，请勿退出…' }[c?.status] || '尚未检测');
   return `<section class="settings-section" id="cli-updates"><div class="section-head"><h2>Amp CLI</h2><div class="heading-actions">${button('check-cli', '检查更新', 'refresh', '', busy ? 'disabled' : '')}${button('update-cli', c?.status === 'updating' ? '更新中…' : '更新 Amp', 'arrow-up', 'primary', busy || running || c?.status !== 'available' ? 'disabled' : '')}</div></div><div class="field cli-target"><label for="cli-target">安装环境</label><select id="cli-target" ${busy ? 'disabled' : ''}><option value="">本机默认</option>${app.runners.map(({ config: r }) => `<option value="${escapeHtml(r.id)}" ${r.id === app.cliTarget ? 'selected' : ''}>${escapeHtml(r.name)} · ${r.backend === 'wsl' ? `WSL / ${escapeHtml(r.distribution || '默认发行版')}` : '本机'}</option>`).join('')}</select></div><dl class="properties"><dt>当前版本</dt><dd><code title="${escapeHtml(c?.version || '')}">${escapeHtml(c?.version?.split(/\s+/)[0] || (c?.error ? '不可用' : '—'))}</code></dd><dt>最新稳定版</dt><dd><code>${escapeHtml(c?.latest || '—')}</code></dd><dt>可执行文件</dt><dd><code>${escapeHtml(c?.executable || '—')}</code></dd></dl><p class="cli-status ${c?.error ? 'cli-error' : ''}" role="status">${escapeHtml(message)}</p>${running && c?.status === 'available' ? '<small>请先停止所有托管 Runner</small>' : ''}</section>`;
 }
@@ -164,7 +166,7 @@ function updateSettings() {
   const u = app.update;
   if (!u) return '';
   const busy = cliBusy() || ['checking', 'downloading', 'restarting'].includes(u.status);
-  const running = app.runners.some((r) => r.status === 'running');
+  const running = app.runners.some(runnerBusy);
   const message = !u.supported ? '本地构建或无界面模式，未启用应用更新。' : u.error || ({ idle: '尚未检查更新', checking: '正在检查…', current: '已是最新版本', available: `发现新版本 ${u.latest}`, downloading: '正在下载并校验…', restarting: '更新已安装，正在重启…' }[u.status] || '');
   return `<section class="settings-section" id="app-updates"><div class="section-head"><h2>AMPM <span class="muted">${escapeHtml(u.current)}</span></h2>${button('check-update', '检查更新', 'refresh', '', !u.supported || busy ? 'disabled' : '')}</div><p role="status">${escapeHtml(message)}</p>${u.checked_at ? `<small>上次检查：${escapeHtml(new Date(u.checked_at).toLocaleString('zh-CN'))}</small>` : ''}${u.latest ? `<div class="section-head">${button('install-update', '安装并重启', 'refresh', 'primary', busy || running ? 'disabled' : '')}${running ? '<small>请先停止所有 Runner</small>' : ''}</div>` : ''}<label class="toggle-row"><span class="toggle-info"><strong>自动更新</strong><small>每 6 小时检查；窗口收起且 Runner 全部停止时安装。</small></span><span class="switch"><input type="checkbox" id="auto-update" aria-label="自动更新 AMPM" ${u.auto_update ? 'checked' : ''} ${!u.supported || busy ? 'disabled' : ''}><span></span></span></label></section>`;
 }
@@ -192,10 +194,11 @@ function inputField(name, label, value, placeholder, extra = '') {
 }
 function openEditor(id) {
   const existing = id ? runnerById(id) : null;
-  if (existing?.status === 'running') { toast('请先停止 Runner 再编辑启动配置。运行中可在详情页添加目录。', true); return; }
+  if (existing && runnerBusy(existing)) { toast('请先停止 Runner（包括待重启）再编辑启动配置。', true); return; }
   const c = existing?.config || { id: '', name: '', directories: [], backend: 'native', executable: 'amp', distribution: '', discover: false, terminal: false, share: false };
   const dialog = $('#editor');
   dialog.innerHTML = `<form id="runner-form">${dialogHead('editor', existing ? '编辑 Runner' : '新建 Runner')}<div class="dialog-body"><div class="form-grid">${inputField('name', '显示名称', c.name, '例如：日常开发', 'required maxlength="80"')}${inputField('id', 'Runner ID', c.id, '例如：dev-workstation', 'required maxlength="63" pattern="[a-zA-Z0-9]([a-zA-Z0-9\\-]*[a-zA-Z0-9])?"')}</div><div class="section-label">运行环境</div><div class="form-grid"><div class="field"><label for="field-backend">启动方式</label><select name="backend" id="field-backend"><option value="native" ${c.backend === 'native' ? 'selected' : ''}>本机原生 · ${escapeHtml(app.platform)}</option>${app.platform === 'windows' ? `<option value="wsl" ${c.backend === 'wsl' ? 'selected' : ''}>WSL · Linux 子系统</option>` : ''}</select></div>${inputField('executable', 'Amp 可执行文件', c.executable, 'amp 或绝对路径', 'required')}</div><div class="field" id="distribution-field" ${c.backend === 'wsl' ? '' : 'hidden'}><label for="field-distribution">WSL 发行版 <span class="optional">可选，留空使用默认发行版</span></label><input name="distribution" id="field-distribution" value="${escapeHtml(c.distribution)}" placeholder="Ubuntu"><small>WSL 需要 setsid、sh、kill，及已登录的 Linux 版 Amp。</small></div><div class="section-label">目录</div><div class="field"><div class="input-row"><textarea name="directories" id="field-directories" aria-label="目录" required rows="4" placeholder="每行一个绝对路径">${escapeHtml(c.directories.join('\n'))}</textarea>${button('browse', '添加', 'plus', '', 'data-target="field-directories"')}</div></div><div class="section-label">特性</div>${[['discover', '自动发现项目', '每分钟扫描列表第一项下两级 Git 项目，最多 200 个。', 'scan'], ['terminal', '远程终端', '允许从 Amp 网页访问本机终端。', 'terminal'], ['share', '共享给工作区', '工作区成员可在 ampcode.com 的 Shared Runners 中使用此 Runner 创建线程。', 'users']].map(([name, label, description, symbol]) => `<label class="toggle-row"><span class="toggle-icon">${icon(symbol)}</span><span class="toggle-info"><strong>${label}</strong><small>${description}</small></span><span class="switch"><input type="checkbox" name="${name}" aria-label="${label}" ${c[name] ? 'checked' : ''}><span></span></span></label>`).join('')}<div id="terminal-warning" class="notice" ${c.terminal ? '' : 'hidden'}>远程终端具有当前用户权限，可访问文件、凭据与网络。</div><div id="share-warning" class="notice" ${c.share ? '' : 'hidden'}>工作区所有成员都将以你的身份在本机运行代码，可使用你的文件、凭据与登录状态，并可能同时修改相同目录。仅共享给你愿意交出本机 Shell 的人。需要 2026-09-24 之后发布的 Amp CLI，旧版可在“设置 → Amp CLI”更新。</div><div class="form-error" role="alert" hidden></div></div><div class="dialog-footer">${existing ? button('delete', '删除配置', 'trash', 'danger subtle', `data-id="${escapeHtml(id)}"`) : ''}${button('close', '取消', '')}<button type="submit" class="btn primary">${icon('check')}${existing ? '保存更改' : '创建 Runner'}</button></div></form>`;
+  $('.form-error', dialog).insertAdjacentHTML('beforebegin', `<div class="section-label">启动与恢复</div><label class="toggle-row"><span class="toggle-info"><strong>随 AMPM 启动</strong><small>每次打开 AMPM 自动启动此 Runner，使用已配置的目录、终端及共享权限。</small></span><span class="switch"><input type="checkbox" name="autostart" aria-label="随 AMPM 启动" ${c.autostart ? 'checked' : ''}><span></span></span></label>${inputField('restart_limit', '异常退出自动重启次数', c.restart_limit || 0, '0 表示关闭', 'type="number" min="0" max="20" step="1" required')}<p class="env-note">0 表示关闭，最多 20 次，每次间隔 5 秒。仅非零退出或启动失败重试；正常退出不重启。手动停止取消重试，手动启动或 AMPM 重新启动后计数重置。</p>`);
   updateBackend();
   $('#runner-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -204,6 +207,7 @@ function openEditor(id) {
     const body = Object.fromEntries(['id', 'name', 'executable', 'backend', 'distribution'].map((key) => [key, String(data.get(key) || '').trim()]));
     body.directories = String(data.get('directories')).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     body.discover = data.has('discover'); body.terminal = data.has('terminal'); body.share = data.has('share');
+    body.autostart = data.has('autostart'); body.restart_limit = Number(data.get('restart_limit'));
     app.busy = true;
     const submit = $('button[type=submit]', dialog); submit.disabled = true;
     try { await api(existing ? runnerUrl(id) : '/api/runners', body, existing ? 'PUT' : 'POST'); dialog.close(); app.focused = body.id; toast(existing ? '配置已保存，下次启动时生效' : 'Runner 已创建，尚未启动'); await refresh(true); }
@@ -384,7 +388,7 @@ document.addEventListener('click', async (event) => {
   } catch (error) { toast(error.message, true); }
 });
 document.addEventListener('input', (event) => { if (event.target.id === 'search') { app.search = event.target.value; renderRunnerList(); } });
-document.addEventListener('change', (event) => {
+document.addEventListener('change', async (event) => {
   const el = event.target;
   if (el.dataset.select) { if (el.checked) app.selected.add(el.dataset.select); else app.selected.delete(el.dataset.select); renderRunnerList(); }
   if (el.id === 'select-all') { visibleRunners().forEach((r) => { if (el.checked) app.selected.add(r.config.id); else app.selected.delete(r.config.id); }); renderRunnerList(); }
@@ -400,6 +404,16 @@ document.addEventListener('change', (event) => {
   if (el.id === 'auto-update') {
     el.disabled = true;
     api('/api/update/preferences', { auto_update: el.checked }).catch((error) => toast(error.message, true)).finally(() => refresh(true));
+  }
+  if (el.id === 'login-startup') {
+    const enabled = el.checked;
+    app.busy = true; el.disabled = true;
+    try {
+      if (enabled && !await confirmAction('启用登录自启？', '当前用户登录 Windows 后会自动启动此处的 AMPM，并启动已勾选“随 AMPM 启动”的 Runner。已有 AMPM 自启入口将改为当前程序、数据目录和端口。', '启用自启')) return;
+      await api('/api/startup', { enabled }); toast(enabled ? '已启用登录自启' : '已关闭登录自启');
+    }
+    catch (error) { toast(error.message, true); }
+    finally { app.busy = false; await refresh(true); }
   }
 });
 document.addEventListener('keydown', (event) => {

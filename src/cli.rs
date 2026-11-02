@@ -109,7 +109,7 @@ impl Cli {
             if runner != state.runner || executable(runner.as_ref()) != state.executable {
                 return Err(conflict("Amp 路径或 Runner 配置已改变，请重新检查更新"));
             }
-            if manager.processes.values_mut().any(|p| p.refresh()) {
+            if manager.processes.values_mut().any(|p| p.busy()) {
                 return Err(conflict("请先停止所有托管 Runner，再更新 Amp"));
             }
             manager.cli_updating = true;

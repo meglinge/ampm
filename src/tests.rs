@@ -16,6 +16,8 @@ pub(crate) fn sample(directory: &FsPath) -> Runner {
         discover: false,
         terminal: false,
         share: false,
+        autostart: false,
+        restart_limit: 0,
     }
 }
 pub(crate) fn test_app(directory: &FsPath) -> App {
@@ -23,6 +25,7 @@ pub(crate) fn test_app(directory: &FsPath) -> App {
         manager: Arc::new(Mutex::new(Manager::load(directory).unwrap())),
         updater: Arc::new(updates::Updater::new(directory, false).unwrap()),
         cli: Arc::new(cli::Cli::new().unwrap()),
+        startup: Arc::new(startup::Startup::new(directory, 19380, false).unwrap()),
         token: "test-token".into(),
         port: 19380,
     }
@@ -52,7 +55,11 @@ pub(crate) async fn request(
         .unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap())
+    (
+        status,
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({"error": String::from_utf8_lossy(&bytes)})),
+    )
 }
 
 #[test]
@@ -278,7 +285,9 @@ async fn windows_amp_commands_work_with_stale_desktop_path() {
             .contains("\"runner\", \"list\"")
     );
     let mut runner = sample(&home.join("work"));
-    let mut child = process::Running::spawn(&runner).await.unwrap();
+    let mut child = process::Running::spawn(&runner, process::Logs::default())
+        .await
+        .unwrap();
     assert!(child.refresh());
     let inspected = process::output(process::command(
         &runner,
@@ -292,7 +301,7 @@ async fn windows_amp_commands_work_with_stale_desktop_path() {
     assert!(child.child.try_wait().unwrap().is_some());
 
     runner.executable = home.join("missing/amp.exe").to_string_lossy().into_owned();
-    let error = match process::Running::spawn(&runner).await {
+    let error = match process::Running::spawn(&runner, process::Logs::default()).await {
         Ok(_) => panic!("An explicit missing path must not fall back to another Amp"),
         Err(error) => error,
     };
@@ -336,6 +345,11 @@ fn legacy_directories_merge_without_loss_or_implicit_disk_write() {
     legacy_runner["cwd"] = json!(original);
     legacy_runner["directories"] = json!([other]);
     legacy_runner["discover"] = json!(true);
+    legacy_runner.as_object_mut().unwrap().remove("autostart");
+    legacy_runner
+        .as_object_mut()
+        .unwrap()
+        .remove("restart_limit");
     for version in [Some(1), None] {
         let mut old = json!({"runners": [legacy_runner.clone()]});
         if let Some(version) = version {
@@ -350,6 +364,8 @@ fn legacy_directories_merge_without_loss_or_implicit_disk_write() {
             [original.clone(), other.clone()]
         );
         assert!(manager.config.runners[0].discover);
+        assert!(!manager.config.runners[0].autostart);
+        assert_eq!(manager.config.runners[0].restart_limit, 0);
         assert_eq!(fs::read(&file).unwrap(), bytes);
         manager.save(manager.config.clone()).unwrap();
         let saved: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
@@ -780,6 +796,193 @@ async fn real_child_lifecycle_partial_batch_failure_and_live_directory_errors() 
     let mut manager = app.manager.lock().await;
     let child = manager.processes.get_mut("test-runner").unwrap();
     assert_eq!(child.exit.as_deref(), Some("由管理器停止"));
-    assert!(child.child.try_wait().unwrap().is_some());
+    assert!(child.process.is_none());
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
+}
+
+#[tokio::test]
+async fn autostart_and_bounded_recovery_respect_stop_success_and_manual_reset() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = directory.path().join(if cfg!(windows) {
+        "fake-amp.exe"
+    } else {
+        "fake-amp"
+    });
+    let compiled = std::process::Command::new("rustc")
+        .args(["tests/fixtures/fake_amp.rs", "-o"])
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let app = test_app(directory.path());
+    let mut runner = sample(directory.path());
+    runner.executable = fixture.to_string_lossy().into_owned();
+    for (id, autostart, limit) in [
+        ("steady", true, 2),
+        ("manual-only", false, 2),
+        ("exit-fixture", true, 2),
+        ("exit-fixture-cancel", true, 3),
+        ("clean-exit-fixture", true, 2),
+        ("recover-fixture", true, 2),
+        ("missing", true, 1),
+    ] {
+        runner.id = id.into();
+        runner.autostart = autostart;
+        runner.restart_limit = limit;
+        let mut config = runner.clone();
+        if id == "missing" {
+            config.executable = directory
+                .path()
+                .join("missing.exe")
+                .to_string_lossy()
+                .into_owned();
+        }
+        assert_eq!(
+            request(&app, "POST", "/api/runners", json!(config)).await.0,
+            StatusCode::OK
+        );
+    }
+    let loaded = Manager::load(directory.path()).unwrap();
+    assert!(loaded.config.runners[0].autostart);
+    assert_eq!(loaded.config.runners[0].restart_limit, 2);
+    // Both sides of the public configuration boundary, not just a UI input limit.
+    for limit in [json!(21), json!(-1), json!(1.5)] {
+        let mut invalid = json!(runner);
+        invalid["restart_limit"] = limit;
+        assert_ne!(
+            request(&app, "PUT", "/api/runners/missing", invalid)
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    let mut boundary = runner.clone();
+    boundary.id = "limit-boundary".into();
+    boundary.autostart = false;
+    boundary.restart_limit = 20;
+    assert_eq!(
+        request(&app, "POST", "/api/runners", json!(boundary))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(&app, "DELETE", "/api/runners/limit-boundary", json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let service = tokio::spawn(serve(app.clone(), listener, async {
+        let _ = stopped.await;
+    }));
+
+    async fn wait(app: &App, id: &str, status: &str, attempts: u32) -> Value {
+        tokio::time::timeout(std::time::Duration::from_secs(25), async {
+            loop {
+                let (_, state) = request(app, "GET", "/api/state", json!(null)).await;
+                let runner = state["runners"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["config"]["id"] == id)
+                    .unwrap();
+                if runner["status"] == status && runner["restart_attempts"] == attempts {
+                    return runner.clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{id}: expected {status}, retries {attempts}"))
+    }
+    let action = |name: &str| format!("/api/runners/{name}/action");
+    wait(&app, "steady", "running", 0).await;
+    wait(&app, "exit-fixture", "restarting", 0).await;
+    wait(&app, "missing", "restarting", 0).await;
+    wait(&app, "clean-exit-fixture", "exited", 0).await;
+    wait(&app, "manual-only", "stopped", 0).await;
+    assert_eq!(
+        request(&app, "DELETE", "/api/runners/exit-fixture", json!({}))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    runner.id = "exit-fixture".into();
+    assert_eq!(
+        request(&app, "PUT", "/api/runners/exit-fixture", json!(runner))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    for id in ["steady", "exit-fixture-cancel"] {
+        assert_eq!(
+            request(&app, "POST", &action(id), json!({"action":"stop"}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    // The real background loop must finish recovery without relying on state polling.
+    tokio::time::sleep(std::time::Duration::from_secs(14)).await;
+    wait(&app, "exit-fixture", "exited", 2).await;
+    let failed = wait(&app, "missing", "exited", 1).await;
+    assert!(failed["exit"].as_str().unwrap().contains("找不到"));
+    wait(&app, "recover-fixture", "running", 1).await;
+    wait(&app, "steady", "stopped", 0).await;
+    wait(&app, "exit-fixture-cancel", "stopped", 0).await;
+    wait(&app, "clean-exit-fixture", "exited", 0).await;
+    let launches = fs::read_to_string(directory.path().join("fixture-launches.txt")).unwrap();
+    for (id, expected) in [
+        ("exit-fixture", 3),
+        ("recover-fixture", 2),
+        ("steady", 1),
+        ("exit-fixture-cancel", 1),
+        ("clean-exit-fixture", 1),
+        ("manual-only", 0),
+    ] {
+        assert_eq!(
+            launches.lines().filter(|line| *line == id).count(),
+            expected,
+            "{id}: {launches}"
+        );
+    }
+    let (_, logs) = request(&app, "GET", "/api/runners/exit-fixture/logs", json!(null)).await;
+    assert!(
+        logs["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line["text"].as_str().unwrap().contains("上限 2 次"))
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &action("exit-fixture"),
+            json!({"action":"start"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    wait(&app, "exit-fixture", "restarting", 0).await;
+    shutdown.send(()).unwrap();
+    service.await.unwrap().unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    let launches = fs::read_to_string(directory.path().join("fixture-launches.txt")).unwrap();
+    assert_eq!(
+        launches
+            .lines()
+            .filter(|line| *line == "exit-fixture")
+            .count(),
+        4
+    );
+    wait(&app, "exit-fixture", "stopped", 0).await;
+    wait(&app, "recover-fixture", "stopped", 1).await;
 }
