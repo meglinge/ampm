@@ -34,6 +34,14 @@ fn main() {
     println!("fixture startup args: {args:?}");
     eprintln!("fixture stderr captured");
     io::stdout().flush().unwrap();
-    if args.iter().any(|s| s == "exit-fixture") { std::process::exit(9); }
+    let id = &args[args.iter().position(|s| s == "--runner-id").unwrap() + 1];
+    let mut journal = fs::OpenOptions::new().append(true).create(true).open("fixture-launches.txt").unwrap();
+    journal.write_all(format!("{id}\n").as_bytes()).unwrap();
+    if id.starts_with("exit-fixture") { std::process::exit(9); }
+    if id == "clean-exit-fixture" { return; }
+    if id == "recover-fixture" && !std::path::Path::new("recovered.once").exists() {
+        fs::write("recovered.once", "first launch fails").unwrap();
+        std::process::exit(9);
+    }
     loop { thread::sleep(Duration::from_secs(1)); }
 }

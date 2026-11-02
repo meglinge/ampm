@@ -13,6 +13,7 @@ $fixture.urls = @()
 $fixture.properties = @{}
 $fixture.links = @()
 $fixture.starts = 0
+$fixture.startup = $null
 $fixture.bytes = [byte[]]::new(128)
 $fixture.bytes[0] = 0x4d; $fixture.bytes[1] = 0x5a; $fixture.bytes[60] = 64
 $fixture.bytes[64] = 0x50; $fixture.bytes[65] = 0x45; $fixture.bytes[68] = 0x64; $fixture.bytes[69] = 0x86
@@ -49,6 +50,10 @@ function Get-Process($ErrorAction) {
     if ($fixture.running) { [pscustomobject]@{ Path = (Join-Path $fixture.installDir 'ampm.exe') } }
 }
 function Get-ItemProperty($LiteralPath, $Name, $ErrorAction) {
+    if ($LiteralPath -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run') {
+        Assert ($Name -eq 'AMPM') 'Read only owned startup value'
+        return [pscustomobject]@{AMPM=$fixture.startup}
+    }
     Assert ($LiteralPath -like '*EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}') 'WebView registry key'
     if ($fixture.runtime) { [pscustomobject]@{pv='123.0.0.1'} }
 }
@@ -69,6 +74,10 @@ function New-Item($Path, $ItemType, [switch]$Force) {
 function New-ItemProperty($Path, $Name, $Value, $PropertyType, [switch]$Force) {
     Assert ($Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AMPM') 'Only per-user uninstall registration'
     $fixture.properties[$Name] = $Value
+}
+function Remove-ItemProperty($LiteralPath, $Name) {
+    Assert ($LiteralPath -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -and $Name -eq 'AMPM') 'Only remove owned startup value'
+    $fixture.startup = $null
 }
 function New-Object($ComObject) {
     Assert ($ComObject -eq 'WScript.Shell') 'Shortcut COM type'
@@ -127,7 +136,12 @@ try {
     Assert (@(Get-ChildItem -LiteralPath $fixture.installDir -Filter '.install-*').Count -eq 0) 'All staging directories cleaned'
     Assert (@($fixture.urls | Where-Object { $_ -notlike 'https://github.com/fixture/ampm/releases/download/v0.1.0/*' -and $_ -notlike 'https://go.microsoft.com/*' }).Count -eq 0) 'Version-pinned assets only'
 
+    $fixture.startup = '"C:\Other AMPM\ampm.exe" --port 19381'
     & $installer -InstallDir $fixture.installDir -Uninstall
+    Assert ($null -ne $fixture.startup) 'Uninstall preserves another installation startup'
+    $fixture.startup = '"' + $target + '" --data-dir "D:\My Data\." --port 19380'
+    & $installer -InstallDir $fixture.installDir -Uninstall
+    Assert ($null -eq $fixture.startup) 'Uninstall removes its login startup'
     Assert (-not (Test-Path -LiteralPath $target)) 'Executable removed'
     Assert ((Get-Content -LiteralPath (Join-Path $fixture.installDir 'user-data.txt') -Raw) -eq 'keep me') 'Uninstall preserves other files'
     Write-Host 'PASS: install, reinstall, checksum rejection, running/locked executable, runtime signature, uninstall.'

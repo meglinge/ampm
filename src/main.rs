@@ -4,6 +4,7 @@ mod cli;
 #[cfg(windows)]
 mod desktop;
 mod process;
+mod startup;
 #[cfg(test)]
 mod tests;
 mod updates;
@@ -47,6 +48,10 @@ pub struct Runner {
     pub terminal: bool,
     #[serde(default)]
     pub share: bool,
+    #[serde(default)]
+    pub autostart: bool,
+    #[serde(default)]
+    pub restart_limit: u32,
 }
 fn default_executable() -> String {
     "amp".into()
@@ -101,6 +106,9 @@ fn validate(runner: &Runner) -> Result<(), ApiError> {
     }
     if runner.name.trim().is_empty() || runner.name.chars().count() > 80 {
         return Err(fail("显示名称应为 1–80 个字符"));
+    }
+    if runner.restart_limit > 20 {
+        return Err(fail("自动重启次数应为 0–20，0 表示关闭"));
     }
     if !["native", "wsl"].contains(&runner.backend.as_str()) {
         return Err(fail("未知运行环境"));
@@ -160,7 +168,7 @@ fn verify_native_paths(runner: &Runner) -> Result<(), ApiError> {
 struct Manager {
     config: Config,
     file: PathBuf,
-    processes: HashMap<String, process::Running>,
+    processes: HashMap<String, process::Runtime>,
     updating: bool,
     cli_updating: bool,
 }
@@ -253,6 +261,9 @@ impl Manager {
     fn active(&mut self, id: &str) -> bool {
         self.processes.get_mut(id).is_some_and(|p| p.refresh())
     }
+    fn busy(&mut self, id: &str) -> bool {
+        self.processes.get_mut(id).is_some_and(|p| p.busy())
+    }
     async fn action(&mut self, id: &str, action: &str) -> Result<(), ApiError> {
         self.ensure_writable()?;
         let runner = self.runner(id)?;
@@ -268,19 +279,24 @@ impl Manager {
             process.stop(&runner).await?;
         }
         if ["start", "restart"].contains(&action) {
-            verify_native_paths(&runner)?;
-            let process = process::Running::spawn(&runner).await?;
-            self.processes.insert(id.to_string(), process);
+            self.processes
+                .entry(id.to_string())
+                .or_insert_with(process::Runtime::new)
+                .start(&runner)
+                .await?;
         }
         Ok(())
     }
     fn view(&mut self) -> Value {
         let runners = self.config.runners.clone().into_iter().map(|runner| {
             let active = self.active(&runner.id);
-            let process = self.processes.get(&runner.id);
-            json!({"config": runner, "status": if active { "running" } else if process.is_some_and(|p| p.exit.as_deref() != Some("由管理器停止")) { "exited" } else { "stopped" },
-                "pid": process.filter(|_| active).and_then(|p| p.child.id()), "started": process.filter(|_| active).map(|p| p.started),
-                "exit": process.and_then(|p| p.exit.clone()), "initial_directories": process.filter(|_| active).map(|p| &p.initial_directories) })
+            let runtime = self.processes.get(&runner.id);
+            let pending = runtime.is_some_and(|p| p.retry_at.is_some());
+            let process = runtime.and_then(|p| p.process.as_ref());
+            json!({"config": runner, "status": if active { "running" } else if pending { "restarting" } else if runtime.is_some_and(|p| p.exit.as_deref() != Some("由管理器停止")) { "exited" } else { "stopped" },
+                "pid": process.and_then(|p| p.child.id()), "started": process.map(|p| p.started),
+                "exit": runtime.and_then(|p| p.exit.clone()), "restart_attempts": runtime.map_or(0, |p| p.restart_attempts),
+                "initial_directories": process.map(|p| &p.initial_directories) })
         }).collect::<Vec<_>>();
         json!({"runners": runners, "config_path": self.file, "platform": std::env::consts::OS})
     }
@@ -291,6 +307,7 @@ struct App {
     manager: Arc<Mutex<Manager>>,
     updater: Arc<updates::Updater>,
     cli: Arc<cli::Cli>,
+    startup: Arc<startup::Startup>,
     token: String,
     port: u16,
 }
@@ -359,6 +376,7 @@ fn router(app: App) -> Router {
             }),
         )
         .route("/api/state", get(state))
+        .route("/api/startup", post(startup::preferences))
         .route("/api/runners", post(create_runner))
         .route(
             "/api/runners/{id}",
@@ -387,6 +405,7 @@ async fn state(State(app): State<App>) -> Json<Value> {
     view["token"] = json!(app.token);
     view["update"] = json!(app.updater.state().await);
     view["cli"] = json!(app.cli.states.lock().await.clone());
+    view["startup"] = json!(app.startup.state());
     Json(view)
 }
 async fn create_runner(
@@ -418,9 +437,9 @@ async fn update_runner(
     verify_native_paths(&runner)?;
     let mut manager = app.manager.lock().await;
     manager.runner(&id)?;
-    if manager.active(&id) {
+    if manager.busy(&id) {
         return Err(conflict(
-            "请先停止 Runner 再修改启动配置；运行中可单独添加目录",
+            "请先停止 Runner（包括待重启）再修改启动配置；运行中可单独添加目录",
         ));
     }
     if manager
@@ -443,7 +462,7 @@ async fn delete_runner(
 ) -> Result<Json<Value>, ApiError> {
     let mut manager = app.manager.lock().await;
     manager.runner(&id)?;
-    if manager.active(&id) {
+    if manager.busy(&id) {
         return Err(conflict("请先停止 Runner 再删除配置"));
     }
     let mut config = manager.config.clone();
@@ -523,7 +542,13 @@ async fn directory_action(
         verify_native_paths(&next_runner)?;
     }
     if manager.active(&id) {
-        let process = manager.processes.get(&id).unwrap();
+        let process = manager
+            .processes
+            .get(&id)
+            .unwrap()
+            .process
+            .as_ref()
+            .unwrap();
         if body.action == "remove"
             && process
                 .initial_directories
@@ -641,10 +666,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("AMPM {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let port = std::env::var("AMPM_PORT")
-        .unwrap_or_else(|_| "19380".into())
+    let port = argument("--port")?
+        .or_else(|| std::env::var("AMPM_PORT").ok())
+        .unwrap_or_else(|| "19380".into())
         .parse::<u16>()?;
-    let data = std::env::var_os("AMPM_DATA_DIR")
+    let data = argument("--data-dir")?
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("AMPM_DATA_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             directories::ProjectDirs::from("", "", "ampm")
@@ -652,6 +680,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .data_local_dir()
                 .to_path_buf()
         });
+    let data = std::path::absolute(data)?;
     fs::create_dir_all(&data)?;
     let lock = File::options()
         .read(true)
@@ -670,6 +699,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         manager,
         updater: updater.clone(),
         cli: Arc::new(cli::Cli::new()?),
+        startup: Arc::new(startup::Startup::new(&data, port, desktop)?),
         token: uuid::Uuid::new_v4().to_string(),
         port,
     };
@@ -705,6 +735,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn argument(name: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == name {
+            return args
+                .next()
+                .filter(|value| !value.starts_with("--"))
+                .map(Some)
+                .ok_or_else(|| format!("{name} 缺少参数").into());
+        }
+    }
+    Ok(None)
+}
+
 async fn serve(
     app: App,
     listener: tokio::net::TcpListener,
@@ -712,13 +756,38 @@ async fn serve(
 ) -> Result<(), String> {
     let manager = app.manager.clone();
     let updater = app.updater.clone();
+    {
+        let mut manager = manager.lock().await;
+        for runner in manager.config.runners.clone() {
+            if runner.autostart
+                && !manager.busy(&runner.id)
+                && !updater.closing.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let _ = manager.action(&runner.id, "start").await;
+            }
+        }
+    }
     let monitor_manager = manager.clone();
+    let monitor_updater = updater.clone();
     // Process supervision must continue even when there is no visible GUI polling /api/state.
     let monitor = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            for process in monitor_manager.lock().await.processes.values_mut() {
-                process.refresh();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let mut manager = monitor_manager.lock().await;
+            if manager.ensure_writable().is_err()
+                || monitor_updater
+                    .closing
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                || monitor_updater
+                    .restarting
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                continue;
+            }
+            for runner in manager.config.runners.clone() {
+                if let Some(process) = manager.processes.get_mut(&runner.id) {
+                    process.tick(&runner).await;
+                }
             }
         }
     });

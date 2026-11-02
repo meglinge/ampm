@@ -243,11 +243,134 @@ pub async fn output_with_timeout(mut cmd: Command, limit: Duration) -> Result<St
     Ok(text)
 }
 
+// Owns the user's start/stop intent and retry budget across individual child lifetimes.
+pub struct Runtime {
+    pub process: Option<Running>,
+    pub logs: Logs,
+    pub exit: Option<String>,
+    pub restart_attempts: u32,
+    pub retry_at: Option<tokio::time::Instant>,
+    restart_limit: u32,
+}
+
+impl Runtime {
+    pub fn new() -> Self {
+        Self {
+            process: None,
+            logs: Logs::default(),
+            exit: None,
+            restart_attempts: 0,
+            retry_at: None,
+            restart_limit: 0,
+        }
+    }
+
+    pub async fn start(&mut self, runner: &Runner) -> Result<(), ApiError> {
+        self.logs = Logs::default();
+        self.restart_attempts = 0;
+        self.restart_limit = runner.restart_limit;
+        self.retry_at = None;
+        self.launch(runner).await
+    }
+
+    async fn launch(&mut self, runner: &Runner) -> Result<(), ApiError> {
+        let result = async {
+            crate::verify_native_paths(runner)?;
+            Running::spawn(runner, self.logs.clone()).await
+        }
+        .await;
+        match result {
+            Ok(process) => {
+                self.process = Some(process);
+                self.exit = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.exit = Some(error.1.clone());
+                log(&self.logs, "manager", &error.1);
+                self.schedule_retry();
+                Err(error)
+            }
+        }
+    }
+
+    fn schedule_retry(&mut self) {
+        if self.restart_attempts < self.restart_limit {
+            self.retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+            log(
+                &self.logs,
+                "manager",
+                format!(
+                    "5 秒后自动重启（第 {}/{} 次）；可点击停止取消",
+                    self.restart_attempts + 1,
+                    self.restart_limit
+                ),
+            );
+        } else if self.restart_limit > 0 {
+            log(
+                &self.logs,
+                "manager",
+                format!("已达到自动重启上限 {} 次，请手动启动", self.restart_limit),
+            );
+        }
+    }
+
+    pub fn refresh(&mut self) -> bool {
+        if let Some(process) = &mut self.process {
+            if process.refresh() {
+                return true;
+            }
+            let failed = !process.success;
+            self.exit = process.exit.clone();
+            self.process = None;
+            if failed {
+                self.schedule_retry();
+            }
+        }
+        false
+    }
+
+    pub fn busy(&mut self) -> bool {
+        self.refresh() || self.retry_at.is_some()
+    }
+
+    pub async fn tick(&mut self, runner: &Runner) {
+        self.refresh();
+        if self
+            .retry_at
+            .is_some_and(|at| at <= tokio::time::Instant::now())
+        {
+            self.retry_at = None;
+            self.restart_attempts += 1;
+            log(
+                &self.logs,
+                "manager",
+                format!("自动重启 {}/{}", self.restart_attempts, self.restart_limit),
+            );
+            let _ = self.launch(runner).await;
+        }
+    }
+
+    pub async fn stop(&mut self, runner: &Runner) -> Result<(), ApiError> {
+        // Cancel recovery even if the child already exited or stopping it fails.
+        self.retry_at = None;
+        self.restart_limit = 0;
+        if let Some(process) = &mut self.process {
+            process.stop(runner).await?;
+        }
+        self.process = None;
+        self.exit = Some("由管理器停止".into());
+        log(&self.logs, "manager", "已停止，已取消自动重启");
+        Ok(())
+    }
+}
+
 pub struct Running {
     pub child: Child,
     pub logs: Logs,
     pub started: u64,
     pub exit: Option<String>,
+    pub success: bool,
     pub initial_directories: Vec<String>,
     wsl_pid: Arc<Mutex<Option<u32>>>,
     #[cfg(windows)]
@@ -257,7 +380,7 @@ pub struct Running {
 }
 
 impl Running {
-    pub async fn spawn(runner: &Runner) -> Result<Self, ApiError> {
+    pub async fn spawn(runner: &Runner, logs: Logs) -> Result<Self, ApiError> {
         let mut cmd = command(runner, &startup_args(runner), true);
         let mut child = cmd.spawn().map_err(|e| spawn_error(&cmd, e))?;
         #[cfg(windows)]
@@ -272,7 +395,6 @@ impl Running {
         } else {
             None
         };
-        let logs = Logs::default();
         let wsl_pid = Arc::new(Mutex::new(None));
         log(
             &logs,
@@ -303,6 +425,7 @@ impl Running {
             wsl_pid,
             started: now(),
             exit: None,
+            success: false,
             initial_directories: runner.directories.clone(),
             #[cfg(windows)]
             job,
@@ -316,10 +439,10 @@ impl Running {
         match self.child.try_wait() {
             Ok(None) => true,
             Ok(Some(status)) => {
-                let message =
-                    format!("进程已退出：{status}。若由 Amp 更新触发，请检查后重新启动。");
+                let message = format!("进程已退出：{status}");
                 log(&self.logs, "manager", &message);
                 self.exit = Some(message);
+                self.success = status.success();
                 #[cfg(windows)]
                 {
                     self.job.take();

@@ -47,6 +47,11 @@ function Install-AMPM {
     $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'AMPM.lnk'
     $registry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AMPM'
     if ($Uninstall) {
+        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $startup = (Get-ItemProperty -LiteralPath $runKey -Name AMPM -ErrorAction SilentlyContinue).AMPM
+        if ($startup -and $startup.StartsWith(('"' + $target + '"'), [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-ItemProperty -LiteralPath $runKey -Name AMPM
+        }
         # Remove only owned files, never the user's config, Runner folders or other files.
         foreach ($file in @('ampm.exe', 'uninstall.ps1')) {
             $owned = Join-Path $InstallDir $file
