@@ -126,14 +126,52 @@ pub fn native_command(executable: &str) -> Command {
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
             .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".amp")));
-        Command::new(resolve_amp(
+        let mut cmd = Command::new(resolve_amp(
             executable,
             std::env::var_os("PATH").as_deref(),
             amp_home.as_deref(),
-        ))
+        ));
+        // Explorer can hand AMPM the system TEMP (C:\Windows\TEMP), where Amp's Bun
+        // runtime cannot load its native modules. Use the user's own TEMP/TMP instead.
+        for name in ["TEMP", "TMP"] {
+            if let Some(value) = user_environment(name) {
+                cmd.env(name, value);
+            }
+        }
+        cmd
     }
     #[cfg(not(windows))]
     Command::new(executable)
+}
+
+#[cfg(windows)]
+fn user_environment(name: &str) -> Option<std::ffi::OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (key, value) = (wide("Environment"), wide(name));
+    let mut buffer = vec![0u16; 1024];
+    let mut size = (buffer.len() * 2) as u32;
+    // RRF_RT_REG_SZ without RRF_NOEXPAND expands REG_EXPAND_SZ values such as %USERPROFILE%.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    buffer.truncate(size as usize / 2);
+    while buffer.last() == Some(&0) {
+        buffer.pop();
+    }
+    (!buffer.is_empty()).then(|| std::ffi::OsString::from_wide(&buffer))
 }
 
 #[cfg(windows)]
